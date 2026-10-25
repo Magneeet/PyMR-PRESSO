@@ -5,6 +5,9 @@ import pytest
 from pymrpresso import (
     _draw_distortion_subset,
     _format_zero_pvalue,
+    _loo_rss_and_betas,
+    _loo_rss_and_betas_bruteforce,
+    _loo_rss_only,
     mr_presso,
     mr_presso_single_optimized,
 )
@@ -90,3 +93,32 @@ def test_rejects_nonpositive_standard_errors():
     data.loc[data.index[0], "sy"] = 0
     with pytest.raises(ValueError, match="strictly positive"):
         mr_presso("y", "x1", "sy", "sx1", data, NbDistribution=100, seed=1)
+
+
+
+@pytest.mark.parametrize("n,p", [(18, 1), (35, 1), (40, 3), (75, 5)])
+def test_analytic_loo_matches_explicit_refits(n, p):
+    rng = np.random.default_rng(2026 + n + p)
+    x = rng.normal(size=(n, p))
+    # Keep columns well-conditioned but not perfectly orthogonal.
+    x[:, -1] += 0.2 * x[:, 0]
+    y = x @ rng.normal(size=p) + rng.normal(scale=0.7, size=n)
+    weights = np.exp(rng.normal(scale=0.25, size=n))
+
+    rss_fast, beta_fast = _loo_rss_and_betas(x, y, weights)
+    rss_ref, beta_ref = _loo_rss_and_betas_bruteforce(x, y, weights)
+
+    assert rss_fast == pytest.approx(rss_ref, rel=1e-9, abs=1e-9)
+    np.testing.assert_allclose(beta_fast, beta_ref, rtol=1e-8, atol=1e-8)
+    assert _loo_rss_only(x, y, weights) == pytest.approx(rss_ref, rel=1e-9, abs=1e-9)
+
+
+def test_analytic_loo_falls_back_for_high_leverage_design():
+    # One SNP nearly determines the slope, so 1-h_ii approaches zero.
+    x = np.array([[1.0], [1e-6], [2e-6], [3e-6], [4e-6]])
+    y = np.array([0.5, 0.1, 0.2, 0.3, 0.4])
+    weights = np.ones(len(y))
+    rss_fast, beta_fast = _loo_rss_and_betas(x, y, weights)
+    rss_ref, beta_ref = _loo_rss_and_betas_bruteforce(x, y, weights)
+    assert rss_fast == pytest.approx(rss_ref, rel=1e-7, abs=1e-7)
+    np.testing.assert_allclose(beta_fast, beta_ref, rtol=1e-7, atol=1e-7)
