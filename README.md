@@ -76,3 +76,12 @@ This project implements a statistical method; passing software tests does not by
 ## Citation
 
 Verbanck, M., Chen, C.-Y., Neale, B., & Do, R. (2018). Detection of widespread horizontal pleiotropy in causal relationships inferred from Mendelian randomization between complex traits and diseases. *Nature Genetics*, 50(5), 693–698. https://doi.org/10.1038/s41588-018-0099-7
+
+
+### Performance optimization: analytic leave-one-out RSS
+
+The optimized branch computes leave-one-out (LOO) residuals from the weighted QR decomposition and the hat-matrix identity, rather than fitting one regression per SNP for every simulated dataset. In well-conditioned, full-rank designs, this is algebraically equivalent to explicit LOO refits and reduces the repeated RSS calculation from roughly quadratic work in the SNP count to linear work after the QR decomposition. The implementation falls back to explicit LOO regressions when leverage is too close to one.
+
+Observed-data LOO coefficients are still precomputed for the null simulation's outcome means and for the outlier test. Simulated datasets do **not** reuse observed-data LOO coefficients to calculate their Global Test RSS; each simulated exposure/outcome dataset gets its own LOO RSS.
+
+The optimization is intended to preserve the statistic, not the exact Monte Carlo P-value sequence. Different implementations or random-number streams can still yield different empirical P-values. Validate against the official R implementation on representative datasets before production use.
