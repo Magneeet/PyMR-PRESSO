@@ -1,39 +1,78 @@
 # PyMR-PRESSO
-A Fast Python Implementation of MR-PRESSO
-## 📌 Overview  
-MR-PRESSO (**Mendelian Randomization Pleiotropy RESidual Sum and Outlier**) is a powerful method for detecting and correcting horizontal pleiotropy in **Mendelian Randomization (MR)** analyses. However, the original **R-based implementation** can be computationally inefficient, especially when applied to **large-scale GWAS datasets**.  
 
-To address this challenge, we introduce **PyMR-PRESSO**, a **Python-based** implementation optimized for speed and scalability using **NumPy arrays**.  
+A Python implementation of MR-PRESSO for Mendelian randomization analyses.
 
----
+## Corrected implementation
 
-## 🚀 Why PyMR-PRESSO?  
+The core implementation is in \`pymrpresso.py\`. The notebook remains available for interactive use, but import the functions from the module to avoid duplicated implementations.
 
-### ⚡ Challenge: Computational Inefficiency in R  
-- The standard MR-PRESSO **R package** is **slow** on large datasets due to inefficient matrix operations.  
-- Running outlier detection across many **genetic variants (SNPs)** can be prohibitively slow.  
+### Requirements
 
-### ✅ Solution: Python Optimization  
-- **NumPy-powered** implementation for **faster matrix operations**.  
-- **Vectorized computations** to reduce redundant loops and increase performance.  
-- **Parallel processing** support for large-scale MR analyses.  
+Python 3.10 or later is recommended.
 
-### 🐍 Why Python?  
-- **NumPy & Pandas:** Efficient handling of large GWAS datasets.  
-- **Optimized for parallel computing**, reducing runtime significantly.  
-- **Better memory management** compared to R’s in-memory operations.  
+\`\`\`bash
+pip install numpy pandas scipy statsmodels joblib pytest
+\`\`\`
 
-### 📈 Impact  
-- **Drastically improved execution time** compared to the R version.  
-- **Scalability for large GWAS datasets** and high-dimensional MR analyses.  
-- **More accessible** for researchers familiar with Python’s data science ecosystem.
-### 📝 How to Use:
+### Quick start
 
-1. Open the **PyMR-PRESSO Jupyter Notebook** on Google Colab by clicking the link below:
-   - [Open MR-PRESSO-Py Colab Notebook](<https://github.com/masoudrezaei/PyMR-PRESSO/blob/main/PyMR_PRESSO.ipynb>)
+Your input data must contain effect estimates and standard errors for the exposure(s) and outcome. Standard errors must be strictly positive. Optional SNP identifiers are preserved when a column named \`SNP\`, \`rsid\`, \`variant_id\`, or \`variant\` is present.
 
-## 📄 Citation
+\`\`\`python
+import pandas as pd
+from pymrpresso import mr_presso, mr_presso_single_optimized
 
-If you use PyMR-PRESSO in your research, please cite the original MR-PRESSO paper:
+data = pd.read_csv("presso.csv")
 
-Verbanck, M., Chen, C.-Y., Neale, B., & Do, R. (2018). Detection of widespread horizontal pleiotropy in causal relationships inferred from Mendelian randomization between complex traits and diseases. *Nature Genetics*, 50(5), 693–698. [https://doi.org/10.1038/s41588-018-0099-7](https://doi.org/10.1038/s41588-018-0099-7)
+# One exposure
+result = mr_presso_single_optimized(
+    BetaOutcome="Y_effect",
+    BetaExposure="E1_effect",
+    SdOutcome="Y_se",
+    SdExposure="E1_se",
+    data=data,
+    OUTLIERtest=True,
+    DISTORTIONtest=True,
+    SignifThreshold=0.05,
+    NbDistribution=8000,
+    seed=80,
+    n_jobs=-1,
+)
+
+print(result["Global Test"])
+print(result.get("Outlier Test"))
+print(result.get("Distortion Test"))
+print(result["Main MR results"])
+\`\`\`
+
+For multiple exposures, pass lists of column names to \`BetaExposure\` and \`SdExposure\`.
+
+### Statistical and robustness fixes
+
+- Global Test uses leave-one-out (LOO) RSS regardless of whether Outlier Test is enabled.
+- Simulated outcomes use observed exposure effects and observed-data LOO causal estimates, consistent with the reference R algorithm.
+- Outlier residuals use observed-data LOO estimates, with consistent row/column orientation for multiple exposures.
+- Distortion-test resampling samples non-outliers with replacement and uses the reference subset-size convention.
+- Bonferroni-adjusted outlier P-value reporting uses the lower bound \`n_snps / NbDistribution\`.
+- Optional SNP identifiers and original row indices are preserved in the Outlier Test.
+- Parallel simulations use pre-generated per-replicate seeds, so results are reproducible across worker counts for a fixed seed.
+- Inputs are validated for missing columns, non-finite values, non-positive standard errors, insufficient SNPs, and invalid simulation counts.
+
+### Tests
+
+Run from the repository root:
+
+\`\`\`bash
+pip install pytest
+pytest -q
+\`\`\`
+
+The tests cover LOO Global Test consistency, single- and multiple-exposure execution, SNP identifier preservation, distortion resampling, empirical P-value formatting, and invalid standard errors.
+
+## Scientific note
+
+This project implements a statistical method; passing software tests does not by itself establish equivalence to every release of the reference R package. Before using results in a publication, compare output against the official [MR-PRESSO R implementation](https://github.com/rondolab/MR-PRESSO/blob/master/R/mr_presso.R) on the same input data and simulation count, and document the software version and random seed.
+
+## Citation
+
+Verbanck, M., Chen, C.-Y., Neale, B., & Do, R. (2018). Detection of widespread horizontal pleiotropy in causal relationships inferred from Mendelian randomization between complex traits and diseases. *Nature Genetics*, 50(5), 693–698. https://doi.org/10.1038/s41588-018-0099-7
