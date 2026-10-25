@@ -30,33 +30,104 @@ def _as_names(value: str | Sequence[str], name: str) -> list[str]:
     return values
 
 
-def _loo_rss_and_betas(
-    x: np.ndarray, y: np.ndarray, weights: np.ndarray
-) -> tuple[float, np.ndarray]:
-    """Return LOO RSS and one p-dimensional LOO coefficient vector per SNP."""
-    n, p = x.shape
-    if n <= p:
-        raise ValueError("Not enough SNPs to fit leave-one-out regressions")
-
-    sqrt_w = np.sqrt(weights)
-    xw = x * sqrt_w[:, None]
-    yw = y * sqrt_w
-    beta_loo = np.empty((n, p), dtype=float)
-
+def _loo_bruteforce(
+    xw: np.ndarray, yw: np.ndarray, return_betas: bool
+) -> tuple[float, np.ndarray | None]:
+    """Numerically conservative fallback for high-leverage or near-singular designs."""
+    n, p = xw.shape
+    beta_loo = np.empty((n, p), dtype=float) if return_betas else None
+    rss = 0.0
     for i in range(n):
         keep = np.arange(n) != i
-        x_loo = xw[keep]
-        y_loo = yw[keep]
+        x_loo, y_loo = xw[keep], yw[keep]
         if np.linalg.matrix_rank(x_loo) < p:
             raise ValueError(
                 f"Leave-one-out design matrix is rank deficient after removing row {i}; "
                 "check for collinear exposures or too few independent SNPs."
             )
-        beta_loo[i], *_ = np.linalg.lstsq(x_loo, y_loo, rcond=None)
+        beta_i, *_ = np.linalg.lstsq(x_loo, y_loo, rcond=None)
+        if beta_loo is not None:
+            beta_loo[i] = beta_i
+        residual_i = yw[i] - xw[i] @ beta_i
+        rss += float(residual_i * residual_i)
+    return rss, beta_loo
 
-    residuals = yw - np.einsum("ij,ij->i", xw, beta_loo)
-    return float(np.sum(residuals**2)), beta_loo
 
+def _loo_calculation(
+    x: np.ndarray,
+    y: np.ndarray,
+    weights: np.ndarray,
+    return_betas: bool,
+) -> tuple[float, np.ndarray | None]:
+    """Calculate exact LOO RSS using the weighted hat-matrix identity.
+
+    For a full-rank weighted design, the deleted residual is e_i / (1 - h_ii),
+    where e_i is the full-fit weighted residual and h_ii is the leverage.
+    The LOO coefficient vector is beta - (X'X)^-1 x_i * e_i/(1-h_ii).
+    This avoids fitting n separate regressions per simulated dataset.
+
+    If any leverage is too close to one, use explicit LOO fits instead; those
+    cases can be numerically unstable and may become rank-deficient after a
+    row is removed.
+    """
+    n, p = x.shape
+    if n <= p:
+        raise ValueError("Not enough SNPs to fit leave-one-out regressions")
+    if weights.ndim != 1 or len(weights) != n or np.any(~np.isfinite(weights)) or np.any(weights <= 0):
+        raise ValueError("weights must be finite, strictly positive, and have one value per SNP")
+
+    sqrt_w = np.sqrt(weights)
+    xw = x * sqrt_w[:, None]
+    yw = y * sqrt_w
+    if np.linalg.matrix_rank(xw) < p:
+        raise ValueError("Weighted exposure design matrix is rank deficient")
+
+    q, r = np.linalg.qr(xw, mode="reduced")
+    beta_full = np.linalg.solve(r, q.T @ yw)
+    residuals = yw - q @ (q.T @ yw)
+    leverage = np.einsum("ij,ij->i", q, q)
+    loo_denominator = 1.0 - leverage
+
+    # A high-leverage observation can make the closed-form correction unstable.
+    # Fall back to the explicit implementation for robust edge-case handling.
+    if np.any(loo_denominator <= 1e-8):
+        return _loo_bruteforce(xw, yw, return_betas)
+
+    loo_residuals = residuals / loo_denominator
+    rss = float(loo_residuals @ loo_residuals)
+    if not return_betas:
+        return rss, None
+
+    # correction[i] = (X'X)^-1 x_i in the weighted design.
+    # With X = Q R, this is R^-1 q_i^T.
+    correction = np.linalg.solve(r, q.T).T
+    beta_loo = beta_full[None, :] - correction * loo_residuals[:, None]
+    return rss, beta_loo
+
+
+def _loo_rss_and_betas(
+    x: np.ndarray, y: np.ndarray, weights: np.ndarray
+) -> tuple[float, np.ndarray]:
+    """Return exact LOO RSS and one p-dimensional LOO coefficient vector per SNP."""
+    rss, beta_loo = _loo_calculation(x, y, weights, return_betas=True)
+    assert beta_loo is not None
+    return rss, beta_loo
+
+
+def _loo_rss_only(x: np.ndarray, y: np.ndarray, weights: np.ndarray) -> float:
+    """Fast exact LOO RSS for simulations when LOO coefficients are not needed."""
+    rss, _ = _loo_calculation(x, y, weights, return_betas=False)
+    return rss
+
+
+def _loo_rss_and_betas_bruteforce(
+    x: np.ndarray, y: np.ndarray, weights: np.ndarray
+) -> tuple[float, np.ndarray]:
+    """Reference implementation used to test the analytic LOO identity."""
+    sqrt_w = np.sqrt(weights)
+    rss, beta_loo = _loo_bruteforce(x * sqrt_w[:, None], y * sqrt_w, return_betas=True)
+    assert beta_loo is not None
+    return rss, beta_loo
 
 def _simulate_one(
     seed: int,
@@ -74,7 +145,7 @@ def _simulate_one(
     # exposure effects and each SNP's observed-data LOO causal estimate.
     mean_y_sim = np.einsum("ij,ij->i", x, beta_loo_observed)
     y_sim = rng.normal(loc=mean_y_sim, scale=sd_y)
-    rss_sim, _ = _loo_rss_and_betas(x_sim, y_sim, weights)
+    rss_sim = _loo_rss_only(x_sim, y_sim, weights)
     return x_sim, y_sim, rss_sim
 
 
@@ -102,6 +173,17 @@ def _fit_wls(x: np.ndarray, y: np.ndarray, weights: np.ndarray):
     if np.linalg.matrix_rank(x * np.sqrt(weights)[:, None]) < x.shape[1]:
         raise ValueError("The weighted exposure design matrix is rank deficient")
     return sm.WLS(y, x, weights=weights).fit()
+
+
+def _weighted_beta_fast(x: np.ndarray, y: np.ndarray, weights: np.ndarray) -> np.ndarray:
+    """Estimate weighted regression coefficients without statsmodels result overhead."""
+    sqrt_w = np.sqrt(weights)
+    xw = x * sqrt_w[:, None]
+    yw = y * sqrt_w
+    beta, _, rank, _ = np.linalg.lstsq(xw, yw, rcond=None)
+    if rank < x.shape[1]:
+        raise ValueError("The weighted exposure design matrix is rank deficient")
+    return beta
 
 
 def _run_mr_presso(
@@ -261,8 +343,9 @@ def _run_mr_presso(
             )
             for i in range(NbDistribution):
                 subset = _draw_distortion_subset(bias_rng, n_snps, outlier_positions)
-                model_random = _fit_wls(x[subset], y[subset], weights[subset])
-                random_params = np.asarray(model_random.params, dtype=float)
+                random_params = _weighted_beta_fast(
+                    x[subset], y[subset], weights[subset]
+                )
                 with np.errstate(divide="ignore", invalid="ignore"):
                     bias_simulated[i] = (raw_params - random_params) / np.abs(random_params)
 
